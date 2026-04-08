@@ -1,0 +1,14 @@
+name: GitLab External CI Status Bridge
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  bridge:
+    uses: zimble-gitlab-poc-org/central-workflows/.github/workflows/gitlab-pr-external-ci-status.yml@main
+    secrets: inherit
