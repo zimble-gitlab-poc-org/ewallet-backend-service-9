@@ -1,0 +1,9 @@
+name: Provision GitLab External CI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  provision:
+    uses: zimble-gitlab-poc-org/central-workflows/.github/workflows/provision-gitlab-external-ci.yml@main
+    secrets: inherit
