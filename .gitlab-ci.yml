@@ -1,0 +1,120 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH == "DEV"'
+    - if: '$CI_COMMIT_BRANCH == "UAT"'
+    - if: '$CI_COMMIT_BRANCH == "PROD"'
+    - if: '$CI_COMMIT_BRANCH'
+
+variables:
+  EXTERNAL_REPO_CLONE_DIR: ".external-repo"
+
+default:
+  before_script:
+    - |
+      if [ "$CI_PIPELINE_SOURCE" = "trigger" ] && [ -n "${TRIGGER_PAYLOAD:-}" ]; then
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "python3 is required to process the GitHub webhook payload."
+          exit 1
+        fi
+
+        python3 - <<'PY'
+        import json
+        import os
+        import shlex
+        import sys
+
+        payload_path = os.environ.get("TRIGGER_PAYLOAD")
+        expected_repo = os.environ.get("EXTERNAL_REPO_FULL_NAME")
+
+        if not payload_path:
+            sys.exit(0)
+
+        with open(payload_path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+        if "pull_request" in payload:
+            head = payload["pull_request"]["head"]
+            source = {
+                "EXTERNAL_EVENT_KIND": "pull_request",
+                "EXTERNAL_EVENT_ACTION": payload.get("action", ""),
+                "EXTERNAL_SOURCE_REPO": head["repo"]["full_name"],
+                "EXTERNAL_SOURCE_REF": head["ref"],
+                "EXTERNAL_SOURCE_SHA": head["sha"],
+            }
+        else:
+            ref = payload["ref"]
+            if ref.startswith("refs/heads/"):
+                ref = ref[len("refs/heads/"):]
+
+            source = {
+                "EXTERNAL_EVENT_KIND": "push",
+                "EXTERNAL_EVENT_ACTION": "deleted" if payload.get("deleted") else payload.get("action", "push"),
+                "EXTERNAL_SOURCE_REPO": payload["repository"]["full_name"],
+                "EXTERNAL_SOURCE_REF": ref,
+                "EXTERNAL_SOURCE_SHA": payload["after"],
+            }
+
+        repo = source["EXTERNAL_SOURCE_REPO"]
+        if expected_repo and repo != expected_repo:
+            raise SystemExit(
+                f"Refusing to run external CI for '{repo}'. Expected '{expected_repo}'."
+            )
+
+        with open(".external-ci.env", "w", encoding="utf-8") as handle:
+            for key, value in source.items():
+                handle.write(f"export {key}={shlex.quote(value)}\n")
+        PY
+
+        . ./.external-ci.env
+
+        if [ "$EXTERNAL_EVENT_KIND" = "pull_request" ] && \
+           [ "$EXTERNAL_EVENT_ACTION" != "opened" ] && \
+           [ "$EXTERNAL_EVENT_ACTION" != "reopened" ] && \
+           [ "$EXTERNAL_EVENT_ACTION" != "synchronize" ]; then
+          echo "Skipping pull_request action '$EXTERNAL_EVENT_ACTION'."
+          exit 0
+        fi
+
+        if [ "$EXTERNAL_EVENT_KIND" = "push" ] && [ "$EXTERNAL_EVENT_ACTION" = "deleted" ]; then
+          echo "Skipping deleted-branch push event."
+          exit 0
+        fi
+
+        if [ -z "${EXTERNAL_REPO_CLONE_USERNAME:-}" ] || [ -z "${EXTERNAL_REPO_CLONE_TOKEN:-}" ]; then
+          echo "External CI clone credentials are not configured on the GitLab project."
+          exit 1
+        fi
+
+        rm -rf "$EXTERNAL_REPO_CLONE_DIR"
+        git clone --filter=blob:none --no-checkout \
+          "https://${EXTERNAL_REPO_CLONE_USERNAME}:${EXTERNAL_REPO_CLONE_TOKEN}@github.com/${EXTERNAL_SOURCE_REPO}.git" \
+          "$EXTERNAL_REPO_CLONE_DIR"
+
+        cd "$EXTERNAL_REPO_CLONE_DIR"
+        git fetch --depth 1 origin "$EXTERNAL_SOURCE_REF"
+
+        if ! git checkout --detach "$EXTERNAL_SOURCE_SHA"; then
+          git fetch --depth 50 origin "$EXTERNAL_SOURCE_REF"
+          git checkout --detach "$EXTERNAL_SOURCE_SHA"
+        fi
+
+        echo "External source repo   = $EXTERNAL_SOURCE_REPO"
+        echo "External source ref    = $EXTERNAL_SOURCE_REF"
+        echo "External source sha    = $EXTERNAL_SOURCE_SHA"
+        echo "External event         = $EXTERNAL_EVENT_KIND/$EXTERNAL_EVENT_ACTION"
+      fi
+
+stages:
+  - test
+
+hello:
+  stage: test
+  script:
+    - echo "Pipeline is working!"
+    - echo "Branch = $CI_COMMIT_BRANCH"
+    - echo "SHA = $CI_COMMIT_SHA"
+    - echo "Source = $CI_PIPELINE_SOURCE"
